@@ -1,10 +1,11 @@
-import sys, os
+import os, sys
 from cx_Freeze import setup, Executable
+import PyQt6
 
-# Path to PyQt6 plugins (platforms)
+# Correct path to Qt6 platforms folder
 qt_platforms_path = os.path.join(
-    os.path.dirname(sys.executable),
-    "Lib", "site-packages", "PyQt6", "Qt6", "plugins", "platforms"
+    os.path.dirname(PyQt6.__file__),
+    "Qt6", "plugins", "platforms"
 )
 
 build_exe_options = {
@@ -16,16 +17,14 @@ build_exe_options = {
     ],
     "include_files": [
         "logo.png",
-        (qt_platforms_path, "platforms")  # copy the platforms folder
+        (qt_platforms_path, "platforms")  # copy platforms folder
     ],
 }
 
 setup(
     name="Halyra IDE",
-    version="0.3",
-    description="Halyra IDE Beta Edition",
+    version="1.1",
+    description="Halyra IDE: Your Python Friend",
     options={"build_exe": build_exe_options},
-    executables=[
-        Executable("v3.py", base="Win32GUI", icon="logo.png")
-    ],
+    executables=[Executable("main.py", base="Win32GUI", icon="logo.png")],
 )
