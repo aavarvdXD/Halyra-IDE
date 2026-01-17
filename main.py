@@ -12,12 +12,14 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QAction, QFont, QColor, QTextCharFormat, QTextCursor, QFontDatabase
 from PyQt6.QtCore import QSettings, Qt, QDir, QFileInfo, QSize
-import sys, os, subprocess, threading, tempfile, time, queue, json
+import sys, os, subprocess, threading, tempfile, time, queue, json,shlex
 
 # Import our components
-from components import (
+from components2 import (
     ConsoleSignal, PythonHighlighter, CodeEditor, InteractiveConsole
 )
+
+
 
 # Handle Windows-specific icon setting safely
 try:
@@ -34,15 +36,16 @@ class HalyraIDE(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.settings = QSettings("Halyra", "HalyraIDE")
         self.setWindowTitle("Halyra IDE")
         self.setGeometry(100, 100, 1000, 700)
         self._apply_icon()
 
         # --- State ---
         self.file_paths = {}
-        self.settings = QSettings("Halyra", "IDE")
         self.dark_mode = self.settings.value("dark_mode", True, type=bool)
-        self.current_process = None
+        proc = None
+        self.process_lock = threading.Lock()
         self.input_queue = queue.Queue()
         self.current_project_path = None
 
@@ -75,6 +78,10 @@ class HalyraIDE(QMainWindow):
 
         self.setCentralWidget(self.main_splitter)
 
+        self.dark_mode = self.settings.value("dark_mode", True, type=bool)
+
+        self.apply_theme()  # ⬅ APPLY FIRST
+
         self.create_toolbar()
         self.create_status_bar()
         self.setup_console()
@@ -82,8 +89,6 @@ class HalyraIDE(QMainWindow):
 
         # Start with one empty tab
         self.new_tab("main.py")
-        self.apply_theme()
-
     # ---------------------- Setup ---------------------- #
     def _apply_icon(self):
         """Set window icon (Windows-specific handling)"""
@@ -107,7 +112,10 @@ class HalyraIDE(QMainWindow):
         new_action.setShortcut("Ctrl+N")
         new_action.triggered.connect(lambda: self.new_tab("untitled.py"))
         if os.path.exists("icons/new.png"):
-            new_action.setIcon(QIcon("icons/new.png"))
+            if self.dark_mode:
+                new_action.setIcon(QIcon("icons/new.png"))
+            else:
+                new_action.setIcon(QIcon("icons/new_light.png"))
         toolbar.addAction(new_action)
 
         # Open File
@@ -115,7 +123,10 @@ class HalyraIDE(QMainWindow):
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.load_file)
         if os.path.exists("icons/open.png"):
-            open_action.setIcon(QIcon("icons/open.png"))
+            if self.dark_mode:
+                open_action.setIcon(QIcon("icons/open.png"))
+            else:
+                open_action.setIcon(QIcon("icons/open_light.png"))
         toolbar.addAction(open_action)
 
         # Save File
@@ -123,7 +134,10 @@ class HalyraIDE(QMainWindow):
         save_action.setShortcut("Ctrl+S")
         save_action.triggered.connect(self.save_file)
         if os.path.exists("icons/save.png"):
-            save_action.setIcon(QIcon("icons/save.png"))
+            if self.dark_mode:
+                save_action.setIcon(QIcon("icons/save.png"))
+            else:
+                save_action.setIcon(QIcon("icons/save_light.png"))
         toolbar.addAction(save_action)
 
         toolbar.addSeparator()
@@ -133,7 +147,10 @@ class HalyraIDE(QMainWindow):
         run_action.setShortcut("F5")
         run_action.triggered.connect(self.run_code)
         if os.path.exists("icons/run.png"):
-            run_action.setIcon(QIcon("icons/run.png"))
+            if self.dark_mode:
+                run_action.setIcon(QIcon("icons/run.png"))
+            else:
+                run_action.setIcon(QIcon("icons/run_light.png"))
         toolbar.addAction(run_action)
 
         toolbar.addSeparator()
@@ -142,14 +159,20 @@ class HalyraIDE(QMainWindow):
         folder_action = QAction("Open Folder", self)
         folder_action.triggered.connect(self.open_folder)
         if os.path.exists("icons/folder.png"):
-            folder_action.setIcon(QIcon("icons/folder.png"))
+            if self.dark_mode:
+                folder_action.setIcon(QIcon("icons/folder.png"))
+            else:
+                folder_action.setIcon(QIcon("icons/folder_light.png"))
         toolbar.addAction(folder_action)
 
         # Settings
         settings_action = QAction("Settings", self)
         settings_action.triggered.connect(self.open_settings)
         if os.path.exists("icons/settings.png"):
-            settings_action.setIcon(QIcon("icons/settings.png"))
+            if self.dark_mode:
+                settings_action.setIcon(QIcon("icons/settings.png"))
+            else:
+                settings_action.setIcon(QIcon("icons/settings_light.png"))
         toolbar.addAction(settings_action)
 
     def setup_file_explorer(self):
@@ -162,11 +185,6 @@ class HalyraIDE(QMainWindow):
         self.file_tree_dock = QWidget()
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
-
-        # Add a button to open folder
-        open_folder_btn = QPushButton("Open Folder")
-        open_folder_btn.clicked.connect(self.open_folder)
-        layout.addWidget(open_folder_btn)
         layout.addWidget(self.file_tree)
 
         self.file_tree_dock.setLayout(layout)
@@ -241,14 +259,29 @@ class HalyraIDE(QMainWindow):
     def open_settings(self):
         """Open settings dialog"""
         dialog = SettingsDialog(self)
-        if dialog.exec():
-            # Apply settings
-            self.output_buffer_delay = dialog.fps_spinbox.value() / 1000.0
-            self.dark_mode = dialog.dark_mode_checkbox.isChecked()
-            self.apply_theme()
-            self.settings.setValue("dark_mode", self.dark_mode)
-            self.settings.setValue("output_fps", dialog.fps_spinbox.value())
+        old_dark_mode = self.dark_mode
 
+        if dialog.exec():
+            # 1. Update local variables from dialog
+            new_dark_mode = dialog.dark_mode_checkbox.isChecked()
+            new_fps_value = dialog.fps_spinbox.value()
+
+            # 2. SAVE TO DISK IMMEDIATELY
+            self.settings.setValue("dark_mode", new_dark_mode)
+            self.settings.setValue("output_fps", new_fps_value)
+            self.settings.sync()  # Force the OS to write the file now
+
+            # 3. Update current session state
+            self.dark_mode = new_dark_mode
+            self.output_buffer_delay = new_fps_value / 1000.0
+
+            # 4. Handle Theme Change
+            if self.dark_mode != old_dark_mode:
+                # This calls restart_app, which kills the process
+                self.restart_notice()
+            else:
+                # Only apply theme if we aren't restarting
+                self.apply_theme()
     def create_status_bar(self):
         self.status = QStatusBar()
 
@@ -324,29 +357,17 @@ class HalyraIDE(QMainWindow):
 
     # ---------------------- Tabs ---------------------- #
     def new_tab(self, name: str, content: str = ""):
-        editor = CodeEditor()
+        # Pass the current theme state to the new editor
+        editor = CodeEditor(is_light=not self.dark_mode)
 
-        # Connect cursor position changed to update status
         editor.cursorPositionChanged.connect(self.update_cursor_position)
-
-        # Try to load JetBrains Mono font
-        font_loaded = False
-        if os.path.exists("JetBrainsMono-Regular.ttf"):
-            font_id = QFontDatabase.addApplicationFont("JetBrainsMono-Regular.ttf")
-            if font_id != -1:
-                families = QFontDatabase.applicationFontFamilies(font_id)
-                if families:
-                    editor.setFont(QFont(families[0], 10))
-                    font_loaded = True
-
-        # Fallback to Consolas if JetBrains Mono not available
-        if not font_loaded:
-            editor.setFont(QFont("Consolas", 11))
+        # ... (font loading logic)
 
         editor.setPlainText(content)
 
-        # Keep a reference to prevent GC
+        # Create highlighter and set its theme
         editor.highlighter = PythonHighlighter(editor.document())
+        editor.highlighter.set_theme(dark_mode=self.dark_mode)
 
         idx = self.tabs.addTab(editor, name)
         self.tabs.setCurrentIndex(idx)
@@ -421,122 +442,94 @@ class HalyraIDE(QMainWindow):
 
     # ---------------------- Run Code ---------------------- #
     def run_code(self):
-        editor = self.current_editor()
-        if not editor:
-            QMessageBox.warning(self, "No Editor", "No active editor.")
+        if self.current_process is not None:
+            self.console_signals.append_text.emit(
+                "⚠ A process is already running.\n", QColor("yellow")
+            )
             return
 
-        code = editor.toPlainText()
-        try:
-            compile(code, "<string>", "exec")
-        except SyntaxError as e:
-            self.console_signals.append_text.emit(f"SyntaxError: {e}", QColor("red"))
+        command = self.build_run_command()
+        if not command:
             return
 
         self.console.clear()
-        start = time.time()
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".py", mode='w', encoding='utf-8')
-        tmp.write(code)
-        tmp.close()
-        tmp_path = tmp.name
 
-        def execute():
+        def read_stream(stream, color):
             try:
-                self.current_process = subprocess.Popen(
-                    [sys.executable, "-u", tmp_path],
+                for line in stream:
+                    self.console_signals.append_text.emit(line, color)
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        def worker():
+            proc = None
+            try:
+                proc = subprocess.Popen(
+                    command,
+                    cwd=self.current_working_dir,
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    stdin=subprocess.PIPE,
                     text=True,
-                    bufsize=0,  # Unbuffered
-                    encoding='utf-8',
-                    errors='replace'  # Replace problematic characters instead of crashing
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1
                 )
 
-                # Read stdout in a separate thread
-                def read_stdout():
-                    buffer = ""
-                    last_was_newline = True
+                self.current_process = proc
 
-                    while True:
-                        char = self.current_process.stdout.read(1)
-                        if not char:
-                            # End of stream
-                            if buffer:
-                                self.console_signals.append_text.emit(buffer, QColor("#B5CEA8"))
-                            break
+                out_thread = threading.Thread(
+                    target=read_stream,
+                    args=(proc.stdout, QColor("white")),
+                    daemon=True
+                )
+                err_thread = threading.Thread(
+                    target=read_stream,
+                    args=(proc.stderr, QColor("red")),
+                    daemon=True
+                )
 
-                        # Print character immediately for smooth output
-                        self.console_signals.append_text.emit(char, QColor("#B5CEA8"))
-                        time.sleep(self.output_buffer_delay)  # Control output speed (60 FPS)
-
-                        buffer += char
-
-                        # If we got a newline, clear buffer
-                        if char == '\n':
-                            buffer = ""
-                            last_was_newline = True
-                        else:
-                            last_was_newline = False
-
-                        # Check if waiting for input (no newline for a while)
-                        if not last_was_newline and self.current_process.poll() is None:
-                            # Peek ahead briefly to see if more output is coming
-                            time.sleep(self.output_buffer_delay * 3)  # Wait a bit longer
-
-                            # If still no newline and process running, probably waiting for input
-                            if buffer and not buffer.endswith('\n'):
-                                buffer = ""
-                                self.console_signals.request_input.emit()
-
-                def read_stderr():
-                    for line in iter(self.current_process.stderr.readline, ''):
-                        if line:
-                            self.console_signals.append_text.emit(line.rstrip(), QColor("#F48771"))
-
-                out_thread = threading.Thread(target=read_stdout, daemon=True)
-                err_thread = threading.Thread(target=read_stderr, daemon=True)
                 out_thread.start()
                 err_thread.start()
 
-                # Monitor process and handle input
-                while self.current_process.poll() is None:
+                proc.wait()
+
+                out_thread.join()
+                err_thread.join()
+
+            except Exception as e:
+                self.console_signals.append_text.emit(
+                    f"\n❌ Execution error: {e}\n", QColor("red")
+                )
+
+            finally:
+                if proc:
                     try:
-                        user_input = self.input_queue.get(timeout=0.1)
-                        self.current_process.stdin.write(user_input + '\n')
-                        self.current_process.stdin.flush()
-                    except queue.Empty:
+                        if proc.stdin:
+                            proc.stdin.close()
+                    except Exception:
                         pass
 
-                out_thread.join(timeout=1)
-                err_thread.join(timeout=1)
-
-                dur = time.time() - start
-                self.console_signals.append_text.emit(f"\n[Execution finished in {dur:.2f}s]", QColor("#9CDCFE"))
-            except Exception as e:
-                self.console_signals.append_text.emit(f"\nError: {e}", QColor("red"))
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
                 self.current_process = None
 
-        threading.Thread(target=execute, daemon=True).start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def enable_console_input(self):
         """Enable input in console"""
-        if self.current_process and self.current_process.poll() is None:
+        if proc and proc.poll() is None:
             self.console.enable_input()
 
     def on_console_input(self, text):
         """Handle input submitted from console"""
         self.input_queue.put(text)
         # Re-enable input for next prompt
-        if self.current_process and self.current_process.poll() is None:
+        if proc and proc.poll() is None:
             def delayed_input():
                 time.sleep(0.1)
-                if self.current_process and self.current_process.poll() is None:
+                if proc and proc.poll() is None:
                     self.console_signals.request_input.emit()
 
             threading.Thread(target=delayed_input, daemon=True).start()
@@ -606,46 +599,116 @@ class HalyraIDE(QMainWindow):
         self.settings.setValue("dark_mode", self.dark_mode)
 
     def apply_theme(self):
+        QApplication.instance().setStyleSheet("")
+
         if self.dark_mode:
-            self.setStyleSheet("""
-QWidget { background-color: #1e1e1e; color: #dcdcdc; }
-QPlainTextEdit, QLineEdit { background-color: #252526; color: #dcdcdc; border: 1px solid #3e3e42; }
-QPushButton { background-color: #3e3e42; color: #fff; border-radius: 4px; padding: 5px; border: none; }
-QPushButton:hover { background-color: #5a5a5f; }
-QMenuBar { background-color: #2d2d30; color: #dcdcdc; padding: 4px; }
-QMenuBar::item { padding: 4px 8px; }
-QMenuBar::item:selected { background-color: #3e3e42; }
-QMenu { background-color: #2d2d30; color: #dcdcdc; border: 1px solid #3e3e42; }
-QMenu::item:selected { background-color: #3e3e42; }
-QToolBar { background-color: #2d2d30; border: none; spacing: 3px; padding: 4px; }
-QToolBar::separator { background-color: #3e3e42; width: 1px; margin: 4px; }
-QTabWidget::pane { border: 1px solid #3e3e42; background-color: #252526; }
-QTabBar::tab { background-color: #2d2d30; color: #dcdcdc; padding: 8px 16px; border: none; margin-right: 2px; }
-QTabBar::tab:selected { background-color: #1e1e1e; border-bottom: 2px solid #007acc; }
-QTabBar::tab:hover { background-color: #3e3e42; }
-QTreeWidget { background-color: #252526; color: #dcdcdc; border: 1px solid #3e3e42; }
-QTreeWidget::item:hover { background-color: #2d2d30; }
-QTreeWidget::item:selected { background-color: #37373d; }
-QStatusBar { background-color: #2d2d30; color: #dcdcdc; }
-QStatusBar::item { border: none; }
-QDockWidget { color: #dcdcdc; }
-QScrollBar:vertical { background-color: #1e1e1e; width: 12px; }
-QScrollBar::handle:vertical { background-color: #424242; min-height: 20px; border-radius: 6px; }
-QScrollBar::handle:vertical:hover { background-color: #4e4e4e; }
-QScrollBar:horizontal { background-color: #1e1e1e; height: 12px; }
-QScrollBar::handle:horizontal { background-color: #424242; min-width: 20px; border-radius: 6px; }
-QScrollBar::handle:horizontal:hover { background-color: #4e4e4e; }
-            """)
+            bg_main = "#1e1e1e"
+            bg_alt = "#252526"
+            border = "#3e3e42"
+            text = "#dcdcdc"
+            scroll_thumb = "#424242"
+            scroll_hover = "#4f4f54"
+            status_bg = "#2d2d30"  # Changed from blue to match theme
         else:
-            self.setStyleSheet("""
-QTabWidget::pane { border: 1px solid #c0c0c0; }
-QTabBar::tab { padding: 8px 16px; border: 1px solid #c0c0c0; margin-right: 2px; background-color: #f0f0f0; }
-QTabBar::tab:selected { background-color: white; border-bottom: 2px solid #007acc; }
-QTabBar::tab:hover { background-color: #e0e0e0; }
-QToolBar { border-bottom: 1px solid #c0c0c0; spacing: 3px; padding: 4px; }
-            """)
+            bg_main = "#F5F5F5"
+            bg_alt = "#FAFAFA"
+            border = "#D0D0D0"
+            text = "#2B2B2B"
+            scroll_thumb = "#D0D0D0"
+            scroll_hover = "#B0B0B0"
+            status_bg = "#EDEDED"
+
+        # Modern Scrollbar CSS
+        scrollbar_qss = f"""
+            QScrollBar:vertical {{
+                border: none;
+                background: transparent;
+                width: 10px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {scroll_thumb};
+                min-height: 20px;
+                border-radius: 5px;
+                margin: 2px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {scroll_hover};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                height: 0px; background: none;
+            }}
+            QScrollBar:horizontal {{
+                border: none;
+                background: transparent;
+                height: 10px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {scroll_thumb};
+                min-width: 20px;
+                border-radius: 5px;
+                margin: 2px;
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                width: 0px; background: none;
+            }}
+        """
+
+        full_qss = f"""
+            QWidget {{ background-color: {bg_main}; color: {text}; }}
+            QPlainTextEdit, QLineEdit {{ 
+                background-color: {bg_alt}; 
+                color: {text}; 
+                border: 1px solid {border}; 
+            }}
+            QHeaderView::section {{
+                background-color: {bg_main};
+                color: {text};
+                border: 1px solid {border};
+            }}
+            QMenuBar {{ background-color: {status_bg}; color: {text}; }}
+            QToolBar {{ background-color: {status_bg}; border-bottom: 1px solid {border}; }}
+            QStatusBar {{ background-color: {status_bg}; color: {text}; border-top: 1px solid {border}; }}
+            QStatusBar QLabel {{ color: {text}; }}
+            QTabWidget::pane {{ border-top: 1px solid {border}; }}
+            QTreeWidget {{ background-color: {bg_alt}; border: none; }}
+
+            /* Apply Scrollbars */
+            {scrollbar_qss}
+
+            /* Checkbox styling */
+            QCheckBox::indicator {{
+                width: 16px; height: 16px;
+                border: 1px solid {border};
+                border-radius: 3px;
+                background-color: {bg_alt};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: #007acc;
+                border: 1px solid #007acc;
+            }}
+        """
+
+        QApplication.instance().setStyleSheet(full_qss)
+
+        # Ensure every existing editor updates its internal 'is_light' state
+        for editor in self.findChildren(CodeEditor):
+            editor.is_light = not self.dark_mode
+            if hasattr(editor, 'highlighter'):
+                editor.highlighter.set_theme(dark_mode=self.dark_mode)
+            editor.highlight_current_line()
+            editor.line_number_area.update()
 
     # ---------------------- Helpers ---------------------- #
+    def restart_app(self):
+        """Restarts the current program."""
+        self.settings.sync() # One last sync for safety
+        python = sys.executable
+        os.execl(python, python, *sys.argv)
+
     def update_status(self):
         idx = self.tabs.currentIndex()
         if idx == -1:
@@ -665,6 +728,23 @@ QToolBar { border-bottom: 1px solid #c0c0c0; spacing: 3px; padding: 4px; }
         cursor.insertText(text, fmt)
         self.console.setTextCursor(cursor)
         self.console.ensureCursorVisible()
+
+    def restart_notice(self):
+        msg = QMessageBox()
+        msg.setWindowTitle("Restart Required")
+        msg.setText("Please restart the application to apply changes.")
+        msg.setIcon(QMessageBox.Icon.Information)
+
+        restart_btn = msg.addButton("Restart", QMessageBox.ButtonRole.AcceptRole)
+        close_btn = msg.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+
+        msg.setDefaultButton(restart_btn)
+
+        msg.exec()
+        if msg.clickedButton() == restart_btn:
+            self.restart_app()
+        else:
+            msg.close()
 
 
 # ---------------------- Settings Dialog ---------------------- #
