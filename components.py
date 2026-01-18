@@ -6,10 +6,28 @@ Contains syntax highlighter, line numbers, code editor, and console
 from PyQt6.QtWidgets import QPlainTextEdit, QWidget, QTextEdit
 from PyQt6.QtGui import (
     QColor, QTextCharFormat, QSyntaxHighlighter, QTextCursor,
-    QPainter, QTextFormat, QKeyEvent
+    QPainter, QTextFormat, QKeyEvent, QFont, QFontDatabase, QGuiApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QRegularExpression, QRect, QSize
+import sys, os
 
+# --- Global Font Setup for Halyra Components ---
+def get_halyra_font(size=9):
+    font_path = "JetBrainsMono-Regular.ttf"
+    family = "Consolas"  # Default fallback
+    # Only try to load custom fonts when an application instance exists
+    if QGuiApplication.instance() is not None and os.path.exists(font_path):
+        font_id = QFontDatabase.addApplicationFont(font_path)
+        if font_id != -1:
+            family = QFontDatabase.applicationFontFamilies(font_id)[0]
+
+    font = QFont(family, size)
+    font.setWeight(QFont.Weight.Normal)
+    font.setFixedPitch(True)
+    return font
+
+
+GLOBAL_FONT = get_halyra_font(9)
 # ---------------------- Console Signals ---------------------- #
 class ConsoleSignal(QObject):
     append_text = pyqtSignal(str, QColor)
@@ -34,7 +52,7 @@ class PythonHighlighter(QSyntaxHighlighter):
         # Keywords
         kw_fmt = QTextCharFormat()
         kw_fmt.setForeground(QColor(color_kw))
-        kw_fmt.setFontWeight(700)
+        kw_fmt.setFontWeight(QFont.Weight.Normal)
         keywords = [
             "and", "as", "assert", "break", "class", "continue", "def", "del",
             "elif", "else", "except", "False", "finally", "for", "from",
@@ -86,6 +104,8 @@ class CodeEditor(QPlainTextEdit):
         self.indent_spaces = 4
         self.line_number_area = LineNumberArea(self)
 
+        self.setFont(GLOBAL_FONT)
+
         self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
 
         self.blockCountChanged.connect(self.update_line_number_area_width)
@@ -118,6 +138,7 @@ class CodeEditor(QPlainTextEdit):
 
     def line_number_area_paint_event(self, event):
         painter = QPainter(self.line_number_area)
+        painter.setFont(GLOBAL_FONT)
 
         # Use theme-aware colors for line numbers
         bg = QColor("#F0F0F0") if self.is_light else QColor("#2D2D30")

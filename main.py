@@ -8,14 +8,14 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QPushButton, QFileDialog, QTabWidget, QDockWidget,
     QInputDialog, QMessageBox, QLineEdit, QLabel, QHBoxLayout, QStatusBar,
     QToolBar, QTreeWidget, QTreeWidgetItem, QSplitter, QDialog, QCheckBox,
-    QSpinBox, QFormLayout, QDialogButtonBox, QHeaderView
+    QSpinBox, QFormLayout, QDialogButtonBox, QHeaderView, QListWidget, QListWidgetItem
 )
 from PyQt6.QtGui import QIcon, QAction, QFont, QColor, QTextCharFormat, QTextCursor, QFontDatabase
-from PyQt6.QtCore import QSettings, Qt, QDir, QFileInfo, QSize
-import sys, os, subprocess, threading, tempfile, time, queue, json,shlex
+from PyQt6.QtCore import QSettings, Qt, QDir, QFileInfo, QSize, pyqtSignal, QTimer
+import sys, os, subprocess, threading, tempfile, time, queue, json, shlex, urllib.request, urllib.parse, re
 
 # Import our components
-from components2 import (
+from components import (
     ConsoleSignal, PythonHighlighter, CodeEditor, InteractiveConsole
 )
 
@@ -33,25 +33,27 @@ except ImportError:
 # ---------------------- Main IDE ---------------------- #
 class HalyraIDE(QMainWindow):
     """Lightweight Python IDE built with PyQt6."""
-
     def __init__(self):
         super().__init__()
         self.settings = QSettings("Halyra", "HalyraIDE")
         self.setWindowTitle("Halyra IDE")
         self.setGeometry(100, 100, 1000, 700)
+
+        # Initialize Fonts
+        self.editor_font = self.setup_fonts()
+
         self._apply_icon()
 
         # --- State ---
         self.file_paths = {}
         self.dark_mode = self.settings.value("dark_mode", True, type=bool)
-        proc = None
+        self.current_process = None  # Fixed variable name from 'proc'
         self.process_lock = threading.Lock()
         self.input_queue = queue.Queue()
         self.current_project_path = None
+        self.current_working_dir = os.getcwd()
 
-        # Output buffer delay (in seconds) - lower = faster output, higher = slower
-        # Adjust this to change how quickly output appears in console
-        self.output_buffer_delay = 1 / 60  # 60 FPS (approximately 0.0167 seconds per character)
+        self.output_buffer_delay = 1 / 60
 
         # --- Signals ---
         self.console_signals = ConsoleSignal()
@@ -59,35 +61,27 @@ class HalyraIDE(QMainWindow):
         self.console_signals.request_input.connect(self.enable_console_input)
 
         # --- Core UI ---
-        # Create main splitter for sidebar and editor
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        # File explorer sidebar
         self.setup_file_explorer()
 
-        # Tabs
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.currentChanged.connect(self.update_status)
-        self.tabs.setMovable(True)  # Allow dragging tabs
+        self.tabs.setMovable(True)
 
         self.main_splitter.addWidget(self.file_tree_dock)
         self.main_splitter.addWidget(self.tabs)
-        self.main_splitter.setStretchFactor(1, 1)  # Give more space to editor
+        self.main_splitter.setStretchFactor(1, 1)
 
         self.setCentralWidget(self.main_splitter)
-
-        self.dark_mode = self.settings.value("dark_mode", True, type=bool)
-
-        self.apply_theme()  # ⬅ APPLY FIRST
+        self.apply_theme()
 
         self.create_toolbar()
         self.create_status_bar()
         self.setup_console()
         self.create_menu_bar()
 
-        # Start with one empty tab
         self.new_tab("main.py")
     # ---------------------- Setup ---------------------- #
     def _apply_icon(self):
@@ -99,6 +93,26 @@ class HalyraIDE(QMainWindow):
                 self.setWindowIcon(QIcon("logo.png"))
         except Exception:
             pass
+
+    def setup_fonts(self):
+        """Load JetBrains Mono or fallback to Arial/Consolas"""
+        font_path = "JetBrainsMono-Regular.ttf"
+        font_family = ""
+
+        if os.path.exists(font_path):
+            font_id = QFontDatabase.addApplicationFont(font_path)
+            if font_id != -1:
+                font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+
+        if not font_family:
+            # Fallback logic: Try Consolas first (better for code), then Arial
+            available = QFontDatabase.families()
+            if "Consolas" in available:
+                font_family = "Consolas"
+            else:
+                font_family = "Arial"
+
+        return QFont(font_family, 9)
 
     def create_toolbar(self):
         """Create the main toolbar"""
@@ -117,6 +131,7 @@ class HalyraIDE(QMainWindow):
             else:
                 new_action.setIcon(QIcon("icons/new_light.png"))
         toolbar.addAction(new_action)
+        toolbar.addSeparator()
 
         # Open File
         open_action = QAction("Open", self)
@@ -128,6 +143,7 @@ class HalyraIDE(QMainWindow):
             else:
                 open_action.setIcon(QIcon("icons/open_light.png"))
         toolbar.addAction(open_action)
+        toolbar.addSeparator()
 
         # Save File
         save_action = QAction("Save", self)
@@ -164,6 +180,7 @@ class HalyraIDE(QMainWindow):
             else:
                 folder_action.setIcon(QIcon("icons/folder_light.png"))
         toolbar.addAction(folder_action)
+        toolbar.addSeparator()
 
         # Settings
         settings_action = QAction("Settings", self)
@@ -306,12 +323,11 @@ class HalyraIDE(QMainWindow):
     def setup_console(self):
         self.console = InteractiveConsole()
         self.console.setReadOnly(True)
-        self.console.setFont(QFont("Consolas", 10))
-        self.console.input_submitted.connect(self.on_console_input)
 
-        self.cmd_input = QLineEdit()
-        self.cmd_input.setPlaceholderText("Terminal commands (e.g., pip install, dir, ls)")
-        self.cmd_input.returnPressed.connect(self.run_terminal_command)
+        # Apply the same font logic to the console
+        self.console.setFont(self.editor_font)
+
+        self.console.input_submitted.connect(self.on_console_input)
 
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self.console.clear)
@@ -319,8 +335,6 @@ class HalyraIDE(QMainWindow):
         layout = QVBoxLayout()
         layout.addWidget(self.console)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Terminal Input:"))
-        row.addWidget(self.cmd_input)
         row.addWidget(clear_btn)
         layout.addLayout(row)
 
@@ -348,8 +362,7 @@ class HalyraIDE(QMainWindow):
 
         # --- Packages Menu ---
         pkg_menu = menubar.addMenu("&Packages")
-        pkg_menu.addAction(QAction("Install Package", self, triggered=self.install_package))
-        pkg_menu.addAction(QAction("Uninstall Package", self, triggered=self.uninstall_package))
+        pkg_menu.addAction(QAction("Package Installer", self, triggered=self.open_package_installer))
 
         # --- Theme ---
         theme_menu = menubar.addMenu("&Theme")
@@ -357,15 +370,14 @@ class HalyraIDE(QMainWindow):
 
     # ---------------------- Tabs ---------------------- #
     def new_tab(self, name: str, content: str = ""):
-        # Pass the current theme state to the new editor
         editor = CodeEditor(is_light=not self.dark_mode)
 
-        editor.cursorPositionChanged.connect(self.update_cursor_position)
-        # ... (font loading logic)
+        # Apply the loaded Font
+        editor.setFont(self.editor_font)
 
+        editor.cursorPositionChanged.connect(self.update_cursor_position)
         editor.setPlainText(content)
 
-        # Create highlighter and set its theme
         editor.highlighter = PythonHighlighter(editor.document())
         editor.highlighter.set_theme(dark_mode=self.dark_mode)
 
@@ -441,6 +453,37 @@ class HalyraIDE(QMainWindow):
             self.update_status()
 
     # ---------------------- Run Code ---------------------- #
+    def build_run_command(self):
+        editor = self.current_editor()
+        if not editor:
+            return None
+
+        path = self.file_paths.get(editor)
+        if not path:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".py", mode="w", encoding="utf-8")
+            tmp.write(editor.toPlainText())
+            tmp.close()
+            path = tmp.name
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(editor.toPlainText())
+
+        self.current_working_dir = os.path.dirname(path) or os.getcwd()
+        return [sys.executable, path]
+
+    def _pump_stdin(self, proc):
+        while proc.poll() is None:
+            try:
+                text = self.input_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                if proc.stdin:
+                    proc.stdin.write(text + "\n")
+                    proc.stdin.flush()
+            except Exception:
+                break
+
     def run_code(self):
         if self.current_process is not None:
             self.console_signals.append_text.emit(
@@ -453,6 +496,7 @@ class HalyraIDE(QMainWindow):
             return
 
         self.console.clear()
+        self.input_queue = queue.Queue()
 
         def read_stream(stream, color):
             try:
@@ -480,6 +524,7 @@ class HalyraIDE(QMainWindow):
                 )
 
                 self.current_process = proc
+                self.console_signals.request_input.emit()
 
                 out_thread = threading.Thread(
                     target=read_stream,
@@ -491,9 +536,15 @@ class HalyraIDE(QMainWindow):
                     args=(proc.stderr, QColor("red")),
                     daemon=True
                 )
+                in_thread = threading.Thread(
+                    target=self._pump_stdin,
+                    args=(proc,),
+                    daemon=True
+                )
 
                 out_thread.start()
                 err_thread.start()
+                in_thread.start()
 
                 proc.wait()
 
@@ -519,43 +570,25 @@ class HalyraIDE(QMainWindow):
 
     def enable_console_input(self):
         """Enable input in console"""
-        if proc and proc.poll() is None:
+        if self.current_process and self.current_process.poll() is None:
             self.console.enable_input()
 
     def on_console_input(self, text):
         """Handle input submitted from console"""
         self.input_queue.put(text)
-        # Re-enable input for next prompt
-        if proc and proc.poll() is None:
+        if self.current_process and self.current_process.poll() is None:
             def delayed_input():
                 time.sleep(0.1)
-                if proc and proc.poll() is None:
+                if self.current_process and self.current_process.poll() is None:
                     self.console_signals.request_input.emit()
 
             threading.Thread(target=delayed_input, daemon=True).start()
 
-    # ---------------------- Terminal ---------------------- #
-    def run_terminal_command(self):
-        cmd = self.cmd_input.text().strip()
-        if not cmd:
-            return
-        self.console_signals.append_text.emit(f"> {cmd}", QColor("#9CDCFE"))
-        self.cmd_input.clear()
-
-        def run():
-            try:
-                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                for line in proc.stdout:
-                    self.console_signals.append_text.emit(line.rstrip(), QColor("#B5CEA8"))
-                for line in proc.stderr:
-                    self.console_signals.append_text.emit(line.rstrip(), QColor("#F48771"))
-                proc.wait()
-            except Exception as e:
-                self.console_signals.append_text.emit(f"Error: {e}", QColor("red"))
-
-        threading.Thread(target=run, daemon=True).start()
-
     # ---------------------- Package Management ---------------------- #
+    def open_package_installer(self):
+        dlg = PackageInstallerDialog(self)
+        dlg.exec()
+
     def install_package(self):
         package, ok = QInputDialog.getText(self, "Install Package", "Enter package name:")
         if ok and package.strip():
@@ -573,7 +606,7 @@ class HalyraIDE(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 self._run_pip_command(["uninstall", "-y", package.strip()])
 
-    def _run_pip_command(self, args: list):
+    def _run_pip_command(self, args: list, on_finish=None, on_output=None):
         def run():
             try:
                 process = subprocess.Popen(
@@ -583,12 +616,21 @@ class HalyraIDE(QMainWindow):
                     text=True
                 )
                 for line in process.stdout:
-                    self.console_signals.append_text.emit(line.rstrip(), QColor("#C586C0"))
+                    if on_output:
+                        QTimer.singleShot(0, lambda t=line: on_output(t))
+                    self.console_signals.append_text.emit(line, QColor("#C586C0"))
                 for line in process.stderr:
-                    self.console_signals.append_text.emit(line.rstrip(), QColor("#F48771"))
+                    if on_output:
+                        QTimer.singleShot(0, lambda t=line: on_output(t))
+                    self.console_signals.append_text.emit(line, QColor("#F48771"))
                 process.wait()
             except Exception as e:
+                if on_output:
+                    QTimer.singleShot(0, lambda t=str(e): on_output(t))
                 self.console_signals.append_text.emit(str(e), QColor("red"))
+            finally:
+                if on_finish:
+                    QTimer.singleShot(0, on_finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -658,7 +700,7 @@ class HalyraIDE(QMainWindow):
         """
 
         full_qss = f"""
-            QWidget {{ background-color: {bg_main}; color: {text}; }}
+            QWidget {{ background-color: {bg_main}; color: {text}; font-weight: normal; }}
             QPlainTextEdit, QLineEdit {{ 
                 background-color: {bg_alt}; 
                 color: {text}; 
@@ -771,10 +813,29 @@ class SettingsDialog(QDialog):
         self.fps_spinbox.setSuffix(" ms per character")
         layout.addRow("Output Speed:", self.fps_spinbox)
 
-        # Dialog buttons
+        btn_style = """
+            QPushButton {
+                padding: 6px 12px;
+                border: 1px solid #2D7DFF;
+                border-radius: 4px;
+                background-color: transparent;
+                color: #2D7DFF;
+            }
+            QPushButton:hover {
+                background-color: #3E8CFF;
+                color: white;
+            }
+        """
+
+        pkg_btn = QPushButton("Package Installer")
+        pkg_btn.setStyleSheet(btn_style)
+        pkg_btn.clicked.connect(lambda: parent.open_package_installer() if parent else None)
+        layout.addRow("Packages:", pkg_btn)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        buttons.setStyleSheet(btn_style)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
@@ -782,9 +843,148 @@ class SettingsDialog(QDialog):
         self.setLayout(layout)
 
 
-# ---------------------- Main Entry ---------------------- #
+# ---------------------- Package Installer Dialog ---------------------- #
+class PackageInstallerDialog(QDialog):
+    installed_loaded = pyqtSignal(list, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Package Installer")
+        self.resize(400, 350)
+        self.parent = parent
+
+        self.installed_loaded.connect(self._on_installed_loaded)
+
+        self.package_input = QLineEdit()
+        self.package_input.setPlaceholderText("Enter package name (e.g. requests or numpy==1.24.0)")
+
+        self.install_btn = QPushButton("Install")
+        self.uninstall_btn = QPushButton("Uninstall")
+        self.refresh_btn = QPushButton("Refresh")
+
+        self._style_buttons([self.install_btn, self.uninstall_btn, self.refresh_btn])
+
+        self.install_btn.clicked.connect(self._install)
+        self.uninstall_btn.clicked.connect(self._uninstall)
+        self.refresh_btn.clicked.connect(self.refresh_installed)
+
+        self.installed_list = QListWidget()
+        self.installed_list.itemClicked.connect(self._on_select_installed)
+
+        self.status_label = QLabel("Ready")
+        self.status_label.setWordWrap(True)
+
+        main = QVBoxLayout()
+        main.addWidget(QLabel("Package name:"))
+        main.addWidget(self.package_input)
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.install_btn)
+        btn_row.addWidget(self.uninstall_btn)
+        btn_row.addWidget(self.refresh_btn)
+        main.addLayout(btn_row)
+
+        main.addWidget(QLabel("Installed packages:"))
+        main.addWidget(self.installed_list)
+        main.addWidget(self.status_label)
+
+        self.setLayout(main)
+        self.refresh_installed()
+
+    def _style_buttons(self, buttons):
+        accent = "#2D7DFF"
+        hover = "#3E8CFF"
+        for btn in buttons:
+            btn.setMinimumHeight(30)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    padding: 6px 12px;
+                    border: 1px solid {accent};
+                    border-radius: 4px;
+                    background-color: transparent;
+                    color: {accent};
+                }}
+                QPushButton:hover {{
+                    background-color: {hover};
+                    color: white;
+                }}
+            """)
+
+    def _set_status(self, text: str):
+        self.status_label.setText(text.strip() or "Ready")
+
+    def refresh_installed(self):
+        self._set_status("Loading installed packages...")
+        threading.Thread(target=self._load_installed, daemon=True).start()
+
+    def _load_installed(self):
+        try:
+            output = subprocess.check_output(
+                [sys.executable, "-m", "pip", "list", "--format=json"],
+                text=True,
+                stderr=subprocess.STDOUT
+            )
+            pkgs = json.loads(output)
+            self.installed_loaded.emit(pkgs, "")
+        except Exception as e:
+            self.installed_loaded.emit([], str(e))
+
+    def _on_installed_loaded(self, packages, error):
+        self.installed_list.clear()
+        if error:
+            self._set_status(f"Error: {error}")
+            return
+
+        # Filter out core packages that shouldn't be uninstalled
+        # Note: pip normalizes names (e.g., PyQt6-sip becomes pyqt6-sip or pyqt6_sip)
+        protected_packages = {"pyqt6", "pyqt6-qt6", "pyqt6-sip", "pyqt6_sip"}
+        filtered_packages = [
+            pkg for pkg in packages
+            if pkg["name"].lower().replace("-", "_") not in {p.replace("-", "_") for p in protected_packages}
+        ]
+
+        for pkg in sorted(filtered_packages, key=lambda p: p["name"].lower()):
+            item = QListWidgetItem(f'{pkg["name"]}  ({pkg["version"]})')
+            item.setData(Qt.ItemDataRole.UserRole, pkg["name"])
+            self.installed_list.addItem(item)
+        self._set_status(f"{len(filtered_packages)} packages installed.")
+
+    def _on_select_installed(self, item):
+        name = item.data(Qt.ItemDataRole.UserRole)
+        self.package_input.setText(name)
+
+    def _install(self):
+        name = self.package_input.text().strip()
+        if not name or not self.parent:
+            return
+        self._set_status(f"Installing {name} ...")
+        self.parent._run_pip_command(
+            ["install", name],
+            on_finish=self.refresh_installed,
+            on_output=self._set_status
+        )
+
+    def _uninstall(self):
+        name = self.package_input.text().strip()
+        if not name or not self.parent:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Confirm Uninstall",
+            f"Uninstall '{name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._set_status(f"Uninstalling {name} ...")
+            self.parent._run_pip_command(
+                ["uninstall", "-y", name],
+                on_finish=self.refresh_installed,
+                on_output=self._set_status
+            )
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    ide = HalyraIDE()
-    ide.show()
+    window = HalyraIDE()
+    window.show()
     sys.exit(app.exec())
