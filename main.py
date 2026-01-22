@@ -39,28 +39,38 @@ class HalyraIDE(QMainWindow):
         self.setWindowTitle("Halyra IDE")
         self.setGeometry(100, 100, 1000, 700)
 
-        # Initialize Fonts
-        self.editor_font = self.setup_fonts()
-
-        self._apply_icon()
-
-        # --- State ---
+        # Initialize state first (before UI)
         self.file_paths = {}
         self.dark_mode = self.settings.value("dark_mode", True, type=bool)
-        self.current_process = None  # Fixed variable name from 'proc'
+        self.current_process = None
         self.process_lock = threading.Lock()
         self.input_queue = queue.Queue()
         self.current_project_path = None
         self.current_working_dir = os.getcwd()
-
         self.output_buffer_delay = 1 / 60
 
-        # --- Signals ---
+        # Cache theme stylesheet
+        self._cached_stylesheet = None
+        self._cached_dark_mode = None
+
+        # Defer heavy initialization
+        QTimer.singleShot(0, self._deferred_init)
+
+    def _deferred_init(self):
+        """Defer non-critical initialization for faster startup"""
+        self.editor_font = self.setup_fonts()
+        self._apply_icon()
+
         self.console_signals = ConsoleSignal()
         self.console_signals.append_text.connect(self.append_console_text)
         self.console_signals.request_input.connect(self.enable_console_input)
 
-        # --- Core UI ---
+        self._setup_ui()
+        self.apply_theme()
+        self.new_tab("main.py")
+
+    def _setup_ui(self):
+        """Consolidated UI setup"""
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setup_file_explorer()
 
@@ -75,14 +85,10 @@ class HalyraIDE(QMainWindow):
         self.main_splitter.setStretchFactor(1, 1)
 
         self.setCentralWidget(self.main_splitter)
-        self.apply_theme()
-
         self.create_toolbar()
         self.create_status_bar()
         self.setup_console()
         self.create_menu_bar()
-
-        self.new_tab("main.py")
     # ---------------------- Setup ---------------------- #
     def _apply_icon(self):
         """Set window icon (Windows-specific handling)"""
@@ -763,13 +769,20 @@ class HalyraIDE(QMainWindow):
         self.update_cursor_position()
 
     def append_console_text(self, text: str, color: QColor = QColor("white")):
+        """Optimized console text appending"""
         cursor = self.console.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+
+        # Batch format setting
         fmt = QTextCharFormat()
         fmt.setForeground(color)
-        cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text, fmt)
-        self.console.setTextCursor(cursor)
-        self.console.ensureCursorVisible()
+
+        # Only scroll if near bottom (avoids expensive scroll on every update)
+        scrollbar = self.console.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
+        if at_bottom:
+            self.console.ensureCursorVisible()
 
     def restart_notice(self):
         msg = QMessageBox()
