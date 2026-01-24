@@ -37,3 +37,4 @@ Other
 -Restart prompt when theme changes
 -Console clear button
 -UTF-8 encoding support
+
