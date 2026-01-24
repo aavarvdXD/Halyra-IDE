@@ -35,17 +35,8 @@ Built with **PyQt6**, it focuses on simplicity, performance, and essential tools
   - Prevents running multiple scripts at the same time
 
 ---
-
-## Screenshots
-
 ### Main Editor
 ![Main Editor](screenshots/editor.png)
-
-### Project Explorer
-![Project Explorer](screenshots/explorer.png)
-
-### Console Output
-![Console](screenshots/console.png)
 
 ## 🚀 Getting Started
 
@@ -57,3 +48,4 @@ Built with **PyQt6**, it focuses on simplicity, performance, and essential tools
 Install PyQt6:
 ```bash
 pip install PyQt6
+
