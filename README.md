@@ -1,20 +1,59 @@
-# Halyra-IDE
-An open-source python IDE in development
+# Halyra IDE
 
-To run this app you'll need PyQt6 and Python 3.13
+**Halyra IDE** is an open-source Python IDE currently in development.  
+Built with **PyQt6**, it focuses on simplicity, performance, and essential tools for Python developers.
 
-After that, you can either download the percompiled .exe at the releases tab or compile the source code
+---
 
-Features:
--Tab-based editor with closable, movable tabs
--Python syntax highlighting (via PythonHighlighter)
--Code autocompletion (implemented in CodeEditor)
--Line numbers with current line highlighting
--File Operations
--New file, Open, Save, Save As
--Rename tabs
--Project/folder explorer with tree view (filters hidden files, pycache, venv, etc.)
--Code Execution
--Run Python code (F5) with live output
--Interactive console/terminal with stdin support
--Process management (prevents running multiple scripts simultaneously)
+## Features
+
+- **Tab-based editor**
+  - Closable & movable tabs
+  - Rename tabs
+- **Python syntax highlighting**
+  - Powered by `PythonHighlighter`
+- **Code autocompletion**
+  - Implemented directly in `CodeEditor`
+- **Line numbers**
+  - Current line highlighting
+- **File operations**
+  - New file
+  - Open
+  - Save / Save As
+- **Project / folder explorer**
+  - Tree view
+  - Filters out:
+    - Hidden files
+    - `__pycache__`
+    - `venv`
+- **Code execution**
+  - Run Python scripts with **F5**
+  - Live output
+- **Interactive console / terminal**
+  - Full `stdin` support
+- **Process management**
+  - Prevents running multiple scripts at the same time
+
+---
+
+## Screenshots
+
+### Main Editor
+![Main Editor](screenshots/editor.png)
+
+### Project Explorer
+![Project Explorer](screenshots/explorer.png)
+
+### Console Output
+![Console](screenshots/console.png)
+
+## 🚀 Getting Started
+
+### Requirements
+
+- **Python 3.13**
+- **PyQt6**
+
+Install PyQt6:
+```bash
+pip install PyQt6
