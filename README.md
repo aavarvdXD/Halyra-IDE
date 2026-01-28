@@ -2,7 +2,7 @@
 
 **Halyra IDE** is an open-source Python IDE currently in development.  
 Built with **PyQt6**, it focuses on simplicity, performance, and essential tools for Python developers.
-
+To run, just run main.py
 ---
 
 ## Features
@@ -48,4 +48,5 @@ Built with **PyQt6**, it focuses on simplicity, performance, and essential tools
 Install PyQt6:
 ```bash
 pip install PyQt6
+
 
