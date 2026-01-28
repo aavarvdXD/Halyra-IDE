@@ -4,7 +4,7 @@ Contains syntax highlighter, line numbers, code editor, and console
 """
 
 from PyQt6.QtWidgets import (
-    QPlainTextEdit, QWidget, QTextEdit, QCompleter, QAbstractItemView
+    QPlainTextEdit, QWidget, QTextEdit, QCompleter, QAbstractItemView, QInputDialog
 )
 from PyQt6.QtGui import (
     QColor, QTextCharFormat, QSyntaxHighlighter, QTextCursor,
@@ -106,22 +106,20 @@ class CodeEditor(QPlainTextEdit):
     def __init__(self, is_light=False):
         super().__init__()
         self.is_light = is_light
-        self. indent_spaces = 4
+        self.indent_spaces = 4
         self.line_number_area = LineNumberArea(self)
 
         self.setFont(GLOBAL_FONT)
 
-        # Cache font metrics
-        self._font_metrics = QFontMetricsF(self.font())
-        self._char_width = self._font_metrics.horizontalAdvance(" ")
-        self.setTabStopDistance(self._char_width * 4)
+        # Fix 1: Set correct tab width visually
+        font_metrics = QFontMetricsF(self.font())
+        self.setTabStopDistance(font_metrics.horizontalAdvance(" ") * 4)
 
-        # Cache completer width
-        self. completer_width = int(self._char_width * 25)
+        # Set completer popup width
+        self.completer_width = int(font_metrics.horizontalAdvance("x") * 25)
 
         self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
 
-        # Use queued connections for less critical updates
         self.blockCountChanged.connect(self.update_line_number_area_width)
         self.updateRequest.connect(self.update_line_number_area)
         self.cursorPositionChanged.connect(self.highlight_current_line)
@@ -129,33 +127,39 @@ class CodeEditor(QPlainTextEdit):
         self.update_line_number_area_width(0)
         self.highlight_current_line()
 
-        self._setup_completer()
-
-    def _setup_completer(self):
-        """Separate completer setup for cleaner code"""
         self.completer = QCompleter(self)
         self.completer.setWidget(self)
         self.completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.completer.activated.connect(self.insert_completion)
 
+        # Fix 3: Style the Autocomplete UI
         popup = self.completer.popup()
-        bg_col = "#FFFFFF" if self.is_light else "#252526"
-        txt_col = "#000000" if self.is_light else "#CCCCCC"
-        sel_bg = "#0078D7" if self.is_light else "#094771"
-        border = "#C0C0C0" if self.is_light else "#454545"
+
+        # Colors based on theme
+        bg_col = "#FFFFFF" if is_light else "#252526"
+        txt_col = "#000000" if is_light else "#CCCCCC"
+        sel_bg = "#0078D7" if is_light else "#094771"
+        sel_txt = "#FFFFFF"
+        border = "#C0C0C0" if is_light else "#454545"
 
         popup.setStyleSheet(f"""
             QAbstractItemView {{
-                background-color: {bg_col}; color: {txt_col};
-                selection-background-color: {sel_bg}; selection-color: #FFFFFF;
-                border: 1px solid {border}; outline: 0;
+                background-color: {bg_col};
+                color: {txt_col};
+                selection-background-color: {sel_bg};
+                selection-color: {sel_txt};
+                border: 1px solid {border};
+                outline: 0;
             }}
-            QAbstractItemView::item {{ padding: 4px 5px; min-height: 20px; }}
+            QAbstractItemView::item {{
+                padding: 4px 5px;
+                min-height: 20px;
+            }}
         """)
 
-        # Keywords as tuple (immutable, faster iteration)
-        keywords = (
+        # Basic Python Keywords
+        keywords = [
             "False", "None", "True", "and", "as", "assert", "async", "await",
             "break", "case", "class", "continue", "def", "del", "elif", "else",
             "except", "finally", "for", "from", "global", "if", "import", "in",
@@ -190,8 +194,12 @@ class CodeEditor(QPlainTextEdit):
             "asyncio", "subprocess", "logging", "argparse", "typing", "dataclasses",
             "functools", "itertools", "operator", "collections", "inspect",
             "platform"
-        )
-        self.completer.setModel(QStringListModel(list(keywords), self.completer))
+        ]
+
+        # Remove duplicates
+        keywords = list(set(keywords))
+
+        self.completer.setModel(QStringListModel(keywords, self.completer))
 
     def _is_definition_context(self):
         """Check if cursor is in a context where user is naming something (not needing autocomplete)"""
@@ -271,7 +279,8 @@ class CodeEditor(QPlainTextEdit):
 
     def line_number_area_width(self):
         digits = len(str(max(1, self.blockCount())))
-        return 8 + int(self._char_width * digits) if hasattr(self, '_char_width') else 50
+        space = 8 + self.fontMetrics().horizontalAdvance('9') * digits
+        return space
 
     def update_line_number_area_width(self, _):
         self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
@@ -403,6 +412,38 @@ class CodeEditor(QPlainTextEdit):
             self.completer.complete(cr)
         else:
             self.completer.popup().hide()
+
+    @staticmethod
+    def load_file_content_static(file_path, parent_widget=None):
+        """Load file content with encoding handling and size check (static version)."""
+        try:
+            # Check file size (limit: 5MB)
+            if os.path.getsize(file_path) > 5 * 1024 * 1024:  # 5MB
+                raise ValueError("File is too large to open in the editor.")
+
+            # Attempt to open with UTF-8 encoding
+            with open(file_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except UnicodeDecodeError:
+            # If UTF-8 fails, prompt user to select encoding
+            encodings = ["utf-8", "latin-1", "ascii", "cp1252", "iso-8859-1"]
+            encoding, ok = QInputDialog.getItem(
+                parent_widget, "Select Encoding", "Unable to decode file. Select encoding:", encodings, 0, False
+            )
+            if ok:
+                try:
+                    with open(file_path, "r", encoding=encoding) as f:
+                        return f.read()
+                except Exception as e:
+                    raise ValueError(f"Failed to open file with encoding '{encoding}': {e}")
+            else:
+                raise ValueError("File could not be opened due to encoding issues.")
+        except Exception as e:
+            raise ValueError(f"Error opening file: {e}")
+
+    def load_file_content(self, file_path):
+        """Load file content with encoding handling and size check."""
+        return CodeEditor.load_file_content_static(file_path, self)
 
 # ---------------------- Interactive Console ---------------------- #
 class InteractiveConsole(QPlainTextEdit):

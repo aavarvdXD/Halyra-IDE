@@ -15,7 +15,7 @@ from PyQt6.QtCore import QSettings, Qt, QDir, QFileInfo, QSize, pyqtSignal, QTim
 import sys, os, subprocess, threading, tempfile, time, queue, json, shlex, urllib.request, urllib.parse, re
 
 # Import our components
-from components import (
+from components2 import (
     ConsoleSignal, PythonHighlighter, CodeEditor, InteractiveConsole
 )
 
@@ -39,38 +39,28 @@ class HalyraIDE(QMainWindow):
         self.setWindowTitle("Halyra IDE")
         self.setGeometry(100, 100, 1000, 700)
 
-        # Initialize state first (before UI)
+        # Initialize Fonts
+        self.editor_font = self.setup_fonts()
+
+        self._apply_icon()
+
+        # --- State ---
         self.file_paths = {}
         self.dark_mode = self.settings.value("dark_mode", True, type=bool)
-        self.current_process = None
+        self.current_process = None  # Fixed variable name from 'proc'
         self.process_lock = threading.Lock()
         self.input_queue = queue.Queue()
         self.current_project_path = None
         self.current_working_dir = os.getcwd()
+
         self.output_buffer_delay = 1 / 60
 
-        # Cache theme stylesheet
-        self._cached_stylesheet = None
-        self._cached_dark_mode = None
-
-        # Defer heavy initialization
-        QTimer.singleShot(0, self._deferred_init)
-
-    def _deferred_init(self):
-        """Defer non-critical initialization for faster startup"""
-        self.editor_font = self.setup_fonts()
-        self._apply_icon()
-
+        # --- Signals ---
         self.console_signals = ConsoleSignal()
         self.console_signals.append_text.connect(self.append_console_text)
         self.console_signals.request_input.connect(self.enable_console_input)
 
-        self._setup_ui()
-        self.apply_theme()
-        self.new_tab("main.py")
-
-    def _setup_ui(self):
-        """Consolidated UI setup"""
+        # --- Core UI ---
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setup_file_explorer()
 
@@ -85,10 +75,16 @@ class HalyraIDE(QMainWindow):
         self.main_splitter.setStretchFactor(1, 1)
 
         self.setCentralWidget(self.main_splitter)
+        self.apply_theme()
+
         self.create_toolbar()
         self.create_status_bar()
         self.setup_console()
         self.create_menu_bar()
+
+        self.new_tab("main.py")
+
+        self.showMaximized()
     # ---------------------- Setup ---------------------- #
     def _apply_icon(self):
         """Set window icon (Windows-specific handling)"""
@@ -272,12 +268,15 @@ class HalyraIDE(QMainWindow):
         """Handle double click on file tree item"""
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if os.path.isfile(path):
-            # Open the file
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
-            editor = self.new_tab(os.path.basename(path), content)
-            self.file_paths[editor] = path
-            self.update_status()
+            try:
+                # Create a temporary editor to use load_file_content, or use static method
+                temp_editor = CodeEditor(is_light=not self.dark_mode)
+                content = temp_editor.load_file_content(path)
+                editor = self.new_tab(os.path.basename(path), content)
+                self.file_paths[editor] = path
+                self.update_status()
+            except ValueError as e:
+                QMessageBox.critical(self, "Error", str(e))
 
     def open_settings(self):
         """Open settings dialog"""
@@ -452,11 +451,15 @@ class HalyraIDE(QMainWindow):
     def load_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open File", "", "Python Files (*.py)")
         if path:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
-            editor = self.new_tab(os.path.basename(path), content)
-            self.file_paths[editor] = path
-            self.update_status()
+            try:
+                # Create a temporary editor to use load_file_content
+                temp_editor = CodeEditor(is_light=not self.dark_mode)
+                content = temp_editor.load_file_content(path)
+                editor = self.new_tab(os.path.basename(path), content)
+                self.file_paths[editor] = path
+                self.update_status()
+            except ValueError as e:
+                QMessageBox.critical(self, "Error", str(e))
 
     # ---------------------- Run Code ---------------------- #
     def build_run_command(self):
@@ -465,8 +468,24 @@ class HalyraIDE(QMainWindow):
             return None
 
         path = self.file_paths.get(editor)
+
+        # Check if trying to run the IDE itself
+        if path:
+            abs_path = os.path.abspath(path)
+            ide_path = os.path.abspath(__file__)
+            if abs_path == ide_path:
+                QMessageBox.warning(self, "Warning", "Cannot run the IDE from within itself.")
+                return None
+
         if not path:
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".py", mode="w", encoding="utf-8")
+            # Create temp file with a unique prefix to avoid conflicts
+            tmp = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".py",
+                prefix="halyra_run_",
+                mode="w",
+                encoding="utf-8"
+            )
             tmp.write(editor.toPlainText())
             tmp.close()
             path = tmp.name
@@ -475,7 +494,9 @@ class HalyraIDE(QMainWindow):
                 f.write(editor.toPlainText())
 
         self.current_working_dir = os.path.dirname(path) or os.getcwd()
-        return [sys.executable, path]
+
+        # Use -u for unbuffered output to ensure real-time console updates
+        return [sys.executable, "-u", path]
 
     def _pump_stdin(self, proc):
         while proc.poll() is None:
@@ -503,11 +524,16 @@ class HalyraIDE(QMainWindow):
 
         self.console.clear()
         self.input_queue = queue.Queue()
+        # Allow typing immediately when a run starts
+        QTimer.singleShot(0, self.console.enable_input)
 
         def read_stream(stream, color):
             try:
-                for line in stream:
-                    self.console_signals.append_text.emit(line, color)
+                while True:
+                    chunk = stream.read(1)
+                    if chunk == "":
+                        break
+                    self.console_signals.append_text.emit(chunk, color)
             finally:
                 try:
                     stream.close()
@@ -571,24 +597,31 @@ class HalyraIDE(QMainWindow):
                         pass
 
                 self.current_process = None
+                # Reset console state when the process ends
+                QTimer.singleShot(0, lambda: setattr(self.console, "waiting_for_input", False))
+                QTimer.singleShot(0, lambda: self.console.setReadOnly(True))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def enable_console_input(self):
         """Enable input in console"""
         if self.current_process and self.current_process.poll() is None:
-            self.console.enable_input()
+            QTimer.singleShot(50, self.console.enable_input)
 
     def on_console_input(self, text):
         """Handle input submitted from console"""
         self.input_queue.put(text)
-        if self.current_process and self.current_process.poll() is None:
-            def delayed_input():
-                time.sleep(0.1)
-                if self.current_process and self.current_process.poll() is None:
-                    self.console_signals.request_input.emit()
+        # Re-enable input after a short delay if process is still running
+        QTimer.singleShot(100, self._check_and_enable_input)
 
-            threading.Thread(target=delayed_input, daemon=True).start()
+    def _check_and_enable_input(self):
+        """Check if process is still running and enable input if so"""
+        if self.current_process and self.current_process.poll() is None:
+            self.console.enable_input()
+        else:
+            # If the process ended, lock the console again
+            self.console.waiting_for_input = False
+            self.console.setReadOnly(True)
 
     # ---------------------- Package Management ---------------------- #
     def open_package_installer(self):
@@ -769,20 +802,17 @@ class HalyraIDE(QMainWindow):
         self.update_cursor_position()
 
     def append_console_text(self, text: str, color: QColor = QColor("white")):
-        """Optimized console text appending"""
         cursor = self.console.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-
-        # Batch format setting
         fmt = QTextCharFormat()
         fmt.setForeground(color)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text, fmt)
+        self.console.setTextCursor(cursor)
 
-        # Only scroll if near bottom (avoids expensive scroll on every update)
-        scrollbar = self.console.verticalScrollBar()
-        at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
-        if at_bottom:
-            self.console.ensureCursorVisible()
+        if self.console.waiting_for_input:
+            self.console.input_start_pos = self.console.textCursor().position()
+
+        self.console.ensureCursorVisible()
 
     def restart_notice(self):
         msg = QMessageBox()
