@@ -48,5 +48,12 @@ To run, just run main.py
 Install PyQt6:
 ```bash
 pip install PyQt6
+```
+To Run:
+```bash
+python main.py
+```
+In other cases you may need to use python3 or py instead of python, you could also download the exe in the release tab(only for windows, sadly)
+
 
 
