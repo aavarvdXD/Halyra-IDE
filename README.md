@@ -53,6 +53,8 @@ To Run:
 python main.py
 ```
 In other cases you may need to use `python3` or `py` instead of `python`, you could also download the exe in the release tab(only for windows, sadly)
+*Its a lot more recommendable to use source script than using exe as various issues had been reported, althouhg the exe works the same, it gets buggier
+
 
 
 
